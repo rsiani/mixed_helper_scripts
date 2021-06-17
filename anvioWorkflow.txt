@@ -1,0 +1,102 @@
+### ANVI'O 7: PANGENOMIC ANALYSIS
+## Roberto Siani, PhD Student at HMGU-COMI
+# last updated 31.03.2021
+
+####################################################################
+## INSTALLATION WITH MINICONDA
+
+# check conda version
+conda --version
+# update conda
+conda update conda
+# shortcut to download dependencies
+curl https://merenlab.org/files/anvio-conda-environments/anvio-environment-7-LINUX.yaml \
+     --output anvio-environment-7.yaml
+# create environment
+conda env create -f anvio-environment-7.yaml
+# activate environment
+conda activate anvio-7
+# downgrade hmmer to stable version
+conda install -y -c bioconda hmmer=3.2.1
+# download source-code
+curl -L https://github.com/merenlab/anvio/releases/download/v7/anvio-7.tar.gz \
+        --output anvio-7.tar.gz
+# install source-code
+pip install anvio-7.tar.gz
+# little fix
+pip install mistune==0.8.4
+# check everything went fine
+anvi-self-test
+# setup kegg database and SCG database
+anvi-setup-kegg-kofams
+anvi-setup-scg-taxonomy
+
+####################################################################
+## DOWNLOAD GENOMES FROM NCBI
+
+# install ncbi-genome-download
+pip install ncbi-genome-download
+
+# and download your reference genomes
+ncbi-genome-download bacteria --formats fasta --assembly-levels "complete,chromosome,scaffold" --genera Acidovorax --flat-output --parallel 7 --retries 10 --metadata-table metadata.tsv --verbose
+
+####################################################################
+## WORKFLOW
+
+# initiate Anvi'o 7 conda environment
+conda activate anvio-6.2
+
+## I use parallel to speed up computation with multi-threading. Number of threads used depends on your CPU, so check and adjust the number accordingly.
+
+# reformat fasta files to simplify life for Anvi'o
+parallel -j 6 -i {} anvi-script-reformat-fasta {} -o {.}.ffn --simplify-names ::: *.fna
+
+# generate contigs database, which Anvi'o will enrich with annotation and features
+parallel -j 6 -i {} anvi-gen-contigs-database -f {} -o db/{.}.db --project-name "COMI" ::: *.ffn
+
+# while your workstation is doing the hard work for you, start creating the .tsv table with the "name" and "contigs_db_path" (full path!) of the contigs you plan to use. I like to call it db.tsv
+# name	contigs_db_path
+# g1	/home/user/path/to/file/g1.db
+
+# optional de-replication step to get rid of redundant genomes. Use this in case you are running out of CPU or time... switch to fastANI if you don't have a netflix account. I use method TETRA to get things going in a human time and a high similarity threshold as the default 0.9 seems kinda low to me... your call
+anvi-dereplicate-genomes -i db.tsv --output-dir dereplication --skip-fasta-report --program pyANI --method TETRA --similarity-threshold 0.97 --representative-method Qscore --num-threads 6
+
+# annotation with HMM and KEGG
+parallel -j 6 -i {} anvi-run-hmms -c {} ::: *.db
+parallel -j 6 -i {} anvi-run-kegg-kofams -c {} ::: *.db
+
+# taxonomy estimation with SCG
+parallel -j 6 -i {} anvi-run-scg-taxonomy -c {} ::: *.db
+
+# generate genomes storage
+anvi-gen-genomes-storage -e db.tsv -o GENOMES.db
+
+# assemble pangenome. Set mlc-inflation from 2:10 based on the broadness of the pangenome, where 2 is families or further and 10 is strains from the same species. I suggest to set the min-occurrence to 2 as singletons are boring and you rarely acknowledge them anyway in downstream analyses
+anvi-pan-genome -g GENOMES.db -o . --mcl-inflation 10 --min-occurrence 1 --sensitive --project-name "COMI" --num-threads 6
+
+# take a first look at the interactive visualization
+anvi-display-pan -g GENOMES.db -p COMI-PAN.db
+
+# split the pangenome with interactive search in bins: kernel (100%), core (99%-95%), shell (95%-15%), cloud (15%-1%), singleton (if you kept them). Then split the pangenome in more databases.
+anvi-split -g GENOMES.db -p COMI-PAN.db -C default -o SPLIT-PANs
+
+# you can now manually compile a metadata table to add categorical variables for the grouping:
+# name  group
+# strainXXX groupA
+# strainYYY groupB
+
+# import metadata in the pangenome, adding categorical values to your genomes
+anvi-import-misc-data metadata.tsv -p COMI-PAN.db --target-data-table layers
+
+# get enriched functions per group
+anvi-compute-functional-enrichment -g GENOMES.db -p COMI-PAN.db -o functional_enrichment.tsv --category-variable group --functional-occurrence-table-output functional_occurrence.tsv --annotation-source KOfam
+
+## with the default KEGG annotation you can choose between functions, modules and classes, so you might want to repeat it using different annotation-sources
+
+# compute the genomes similarity
+anvi-compute-genome-similarity -e db.tsv -p COMI-PAN.db -o ANI --num-threads 6 --program fastANI
+
+# finally, produce a summary of your pangenome
+anvi-summarize -g GENOMES.db -p COMI-PAN.db -o SUMMARY --collection-name default
+
+## this is just a super-basic script. Now that you have your pangenome, go back to the website and look for more stuff to try :)
